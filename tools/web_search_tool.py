@@ -1,2 +1,2 @@
-from langchain_community.tools import TavilySearchResults
-web_search_tool = TavilySearchResults(max_retries=1)
+from langchain_tavily import TavilySearch
+web_search_tool = TavilySearch(max_results=5)

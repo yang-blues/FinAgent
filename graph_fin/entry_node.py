@@ -3,7 +3,7 @@ from typing import Callable
 from langchain_core.messages import ToolMessage
 
 
-def create_entry_node(assistant_name:str,new_dialog_state:str) -> Callable:
+def create_entry_node(assistant_name:str) -> Callable:
     """
     工厂函数：创建一个"进入子助理"的入口节点。
 
@@ -15,7 +15,6 @@ def create_entry_node(assistant_name:str,new_dialog_state:str) -> Callable:
     回主助理重新分类。缺参数属于本助理的分内事，必须明确排除掉。
 
     :param assistant_name: 子助理的名字。
-    :param new_dialog_state: 要压入状态栈的新状态。
     :return: 入口节点函数。
     """
     def entry_node(state:dict)->dict:
@@ -43,6 +42,5 @@ def create_entry_node(assistant_name:str,new_dialog_state:str) -> Callable:
                     tool_call_id=tool_call_id,
                 )
             ],
-            "dialog_state":new_dialog_state,
         }
     return entry_node

@@ -50,7 +50,7 @@ async def chat(data:ChatRequest,request:Request):
                 yield f"data:{json.dumps(event_data,ensure_ascii=False)}\n\n"
         #检查图是否发生人工审批中断
         #1.获取当前图状态
-        snapshot = await graph.aget_state(config)
+        snapshot = await graph.aget_state(config,subgraphs=True)
         #2.判断是否发生interrupt中断
         has_interrupt = any(
             task.interrupts
@@ -59,8 +59,16 @@ async def chat(data:ChatRequest,request:Request):
         if has_interrupt:
 
             #获取当前状态
-            state = snapshot.values
-
+            state = dict(snapshot.values)
+            # 中断时合规证据还在 trade 子图的状态里（父图要等 wrapper 返回才有）
+            for t in snapshot.tasks:
+                sub = getattr(t, "state", None)
+                sub_vals = sub.values if sub is not None and not isinstance(sub, dict) else None
+                if sub_vals and sub_vals.get("compliance_evidence"):
+                    state["compliance_evidence"] = sub_vals["compliance_evidence"]
+                    state["compliance_warnings"] = sub_vals.get("compliance_warnings", [])
+                    state["compliance_decision"] = sub_vals.get("compliance_decision", "")
+                    break
             #组装审批卡片
             approval_card = build_approval_card(
                 state,

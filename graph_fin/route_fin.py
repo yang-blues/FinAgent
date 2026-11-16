@@ -19,25 +19,28 @@ def route_primary_assistant(state:State):
         return END
     name = tool_calls[0]["name"]
     mapping = {
-        ToResearchAssistant.__name__: "enter_research",
-        ToMarketAssistant.__name__: "enter_market",
-        ToTradeAssistant.__name__: "enter_trade",
+        ToResearchAssistant.__name__: "research",
+        ToMarketAssistant.__name__: "market",
+        ToTradeAssistant.__name__: "trade",
     }
     if name in mapping:
         return mapping[name]
     return "primary_assistant_tools"
 
-def route_to_workflow(state:State) -> str:
-    """中断恢复后按栈顶路由：不用重新分类用户意图。
-
-    这条边让"跨请求、跨天恢复"成为可能——用户第二天回来接着审批，
-    系统直接从 dialog_state 栈顶知道该回到哪个助理。
+def route_after_child(state: State):
+    """wrapper之后，子助理是否主动交还控制权
+    子图结束时把 escalate 的 ToolMessage 留在总线上，这里向后找最近的
+    一条 AIMessage 判断它是不是 CompleteOrEscalate：
+        - 是 → 回主助理（可能需要重新委派或改方案）
+        - 不是 → 子助理已给出最终回答，本轮 END
     """
-    dialog_state = state.get("dialog_state")
-    if not dialog_state:
-        return "primary_assistant"
-    return dialog_state[-1]
-
+    for msg in reversed(state.get("messages", [])):
+        if getattr(msg,"type","") == "ai":
+            calls = msg.tool_calls or []
+            if any(tc["name"] == CompleteOrEscalate.__name__ for tc in calls):
+                return "primary_assistant"
+            return END
+    return END
 #子助理路由
 def _has_escalate(state:dict) -> bool:
     """子助理是否请求交还控制权"""
@@ -56,7 +59,7 @@ def route_research(state: dict):
     if route == END:
         return END
     if _has_escalate(state):
-        return "leave_skill"
+        return "exit"
     return "research_tools"
 #行情助理的路由
 def route_market(state: dict):
@@ -70,7 +73,7 @@ def route_market(state: dict):
     if route == END:
         return END
     if _has_escalate(state):
-        return "leave_skill"
+        return "exit"
     return "market_tools"
 #交易助手的路由
 def route_after_trade_assistant(state: dict):
@@ -95,7 +98,7 @@ def route_after_trade_assistant(state: dict):
     if route == END:
         return END
     if _has_escalate(state):
-        return "leave_skill"
+        return "exit"
     if extract_write_intent(state["messages"]):
         log.info("检测到写操作，强制进入合规核查")
         return "compliance_check"

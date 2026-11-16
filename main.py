@@ -12,16 +12,20 @@ from untils.log_utils import log
 @asynccontextmanager
 async def lifespan(app:FastAPI):
     # 1. 获取 MCP 行情工具
-    stock_tools = await get_stock_tools()
+    try:
+        stock_tools = await get_stock_tools()
+    except Exception as e:
+        log.warning(f"行情 MCP 不可用，行情助理降级为仅本地工具: {e}")
+        stock_tools = []
     #2.创建postgreSQL的异步连接
     async with AsyncPostgresSaver.from_conn_string(POSTGRES_URI) as checkpointer:
 
         #3.初始化Checkpointer所需的数据表
-        # await checkpoint.setup()
+        # await checkpointer.setup()
         #4.延迟导入，构建并编译Langgraph
         from graph_fin.graph_build import build_graph
 
-        builder = build_graph(stock_tools=stock_tools)
+        builder = build_graph(stock_tools=stock_tools,checkpointer=checkpointer)
         graph = builder.compile(checkpointer=checkpointer)
 
         #4.将编译后的图保存到FastAPI应用状态中

@@ -1,47 +1,47 @@
-from typing import Optional, TypedDict, Annotated, Literal
+"""图的状态定义：父图最小总线 + 三个子图私有 schema。
+架构（私有 schema + wrapper）
+"""
+from typing import  TypedDict, Annotated
 
 from langchain_core.messages import AnyMessage
 from langgraph.graph import add_messages
 
-
-def update_dialog_stack(left : list[str],right:Optional[str]) -> list[str]:
-    """
-    更新对话状态栈。
-
-    参数:
-        left (list[str]): 当前的状态栈。
-        right (Optional[str]): 想要添加到栈中的新状态或动作。None 表示不做任何更改；
-                               "pop" 表示弹出栈顶元素；其他值表示入栈。
-    返回:
-        list[str]: 更新后的状态栈。
-    """
-    if right is None:
-        return left
-    if right == "pop":
-        return left[:-1]
-    return left + [right]
-
 class State(TypedDict):
+    """父图状态 = 最小共享总线。
+
+    字段:
+        messages: 对话消息总线。子图的中间消息（tool_call / tool_result）
+                  会经由 wrapper 回传合并到这里。
+        user_profile: 用户画像（风险等级、账户、适当性）。每轮进图时重新
+                      查库写入，不让模型从对话历史里"回忆"——回忆错了
+                      就是适当性事故。
+        summary: 被压缩掉的历史对话摘要（见 graph_fin/memory.py）。
+                 超过阈值时老消息从 messages 中移除，浓缩成这一段文本，
+                 只注入主助理 prompt，不进子图 schema。
     """
-    主图的状态定义：
-    字段：
-        message:对话消息列表，用add_message reducer 做追加和更新
-        user_profile:用户画像（风险等级，账户，适当性）。它是**结构化事实**
-                    每轮进图时重新查库写入，不让模型从对话历史回忆
-        dialog_state:对话状态栈，元素被Literal锁死四个值
-        compliance_decision:合规核查的三种结果pass / block / insufficient_evidence。
-        compliance_evidence:合规证据文本，进审批卡片给用户核对
-        compliance_ticket:合规通过时签发的一次性凭证，下单函数体内校验
-        compliance_warnings:集中度提示这类不拦截但要说的警告
+    messages: Annotated[list[AnyMessage], add_messages]
+    user_profile: str
+    summary: str
+class ChildState(TypedDict):
+    """投研 / 行情子图的私有状态：只有消息史，没有别的。"""
+
+    messages: Annotated[list[AnyMessage], add_messages]
+class TradeState(TypedDict):
+    """交易子图的私有状态：合规中间态全部封在这里。
+
+    字段:
+        messages: 消息史（进子图时从父总线拷贝，出去时只回传最终结果）。
+        compliance_decision: 合规三态 pass / block / insufficient_evidence。
+        compliance_evidence: 合规证据文本（进审批卡片给人核对）。
+        compliance_warnings: 集中度提示这类"不拦截但要说"的告警。
+        approval_decision: 人工审批结论 approved / rejected，
+                           由 approval_node 写入，供其后条件边路由。
     """
-    messages: Annotated[list[AnyMessage],add_messages]
-    user_profile:str
-    dialog_state:Annotated[
-        list[Literal["assistant","research","market","trade"]],
-        update_dialog_stack,
-    ]
+
+    messages: Annotated[list[AnyMessage], add_messages]
     compliance_decision: str
     compliance_evidence: str
     compliance_warnings: list
+    approval_decision: str
 
 

@@ -22,6 +22,7 @@ class FinAssistant:
         :return: 只包含 messages 的状态增量。
         """
         while True:
+
             result = self.runnable.invoke(state)
             #既没有调用工具，内容又是空，视为无效输出，重新问一次
             if not result.tool_calls and (
