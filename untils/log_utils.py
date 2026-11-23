@@ -1,3 +1,4 @@
+import logging
 import sys, os
 from loguru import logger
 
@@ -40,7 +41,19 @@ class MyLogger:
 
     def get_logger(self):
         return self.logger
+class _InterceptHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            level = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+        logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
 
+logging.basicConfig(handlers=[_InterceptHandler()], level=logging.INFO, force=True)
+logging.getLogger("httpx").setLevel(logging.WARNING)      # 否则每次 HTTP 请求都刷一条 INFO
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("openai").setLevel(logging.WARNING)
+logging.getLogger("httpx2").setLevel(logging.WARNING)
 
 log = MyLogger().get_logger()
 

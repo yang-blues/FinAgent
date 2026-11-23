@@ -17,6 +17,8 @@ from langchain_core.tools import BaseTool
 
 from graph_fin.base_data_model import CompleteOrEscalate, ToResearchAssistant, ToMarketAssistant, ToTradeAssistant
 from llm_model.all_llm import llm
+from llm_model.callbacks import LLMMonitorCallback
+from llm_model.llm_client import build_reliable_runnable
 from rag_graph.rag_subgraph import RESEARCH_SAFE_TOOLS
 from tools.fin_tools import MARKET_SAFE_TOOLS, TRADE_SAFE_TOOLS, TRADE_SENSITIVE_TOOLS, get_product_info
 
@@ -78,7 +80,16 @@ research_prompt = ChatPromptTemplate.from_messages([
     ("placeholder", "{messages}"),
 ]).partial(time=datetime.now())
 research_tools = RESEARCH_SAFE_TOOLS + [CompleteOrEscalate]
-research_runnable = research_prompt | llm.bind_tools(research_tools)
+research_llm = build_reliable_runnable(llm.bind_tools(research_tools)).with_config({
+ "callbacks":[
+     LLMMonitorCallback(
+         agent_name="research",
+         model_name="qwen3.8-max-0902"
+     )
+ ]
+})
+
+research_runnable = research_prompt | research_llm
 # ------------------------------------------------------------------ 行情助理
 market_prompt = ChatPromptTemplate.from_messages([
     ("system",
@@ -112,7 +123,16 @@ market_prompt = ChatPromptTemplate.from_messages([
 ]).partial(time=datetime.now())
 def get_market_runnable(mcptool:list[BaseTool]):
     market_tools = MARKET_SAFE_TOOLS + [CompleteOrEscalate] + mcptool
-    market_runnable = market_prompt | llm.bind_tools(market_tools)
+    market_llm = build_reliable_runnable(llm.bind_tools(market_tools)).with_config({
+        "callbacks":[
+            LLMMonitorCallback(
+                agent_name="market",
+                model_name="qwen3.8-max-0902"
+            )
+        ]
+    })
+
+    market_runnable = market_prompt | market_llm
     return market_runnable
 # ------------------------------------------------------------------ 交易助理
 trade_prompt = ChatPromptTemplate.from_messages([
@@ -143,8 +163,23 @@ trade_prompt = ChatPromptTemplate.from_messages([
 
 trade_safe_tools = TRADE_SAFE_TOOLS                 # 路由用：只读，不打断
 trade_sensitive_tools = TRADE_SENSITIVE_TOOLS       # 路由用：写操作，强制合规 + 人工审批
-trade_runnable = trade_prompt | llm.bind_tools(
-    trade_safe_tools + trade_sensitive_tools + [CompleteOrEscalate])
+
+trade_llm = build_reliable_runnable(
+    llm.bind_tools(
+        trade_safe_tools
+        + trade_sensitive_tools
+        + [CompleteOrEscalate]
+    )
+).with_config({
+    "callbacks": [
+        LLMMonitorCallback(
+            agent_name="trade",
+            model_name="qwen3.8-max-0902",
+        )
+    ]
+})
+
+trade_runnable = trade_prompt | trade_llm
 
 # ------------------------------------------------------------------ 主助理
 primary_prompt = ChatPromptTemplate.from_messages([
@@ -177,5 +212,21 @@ primary_prompt = ChatPromptTemplate.from_messages([
 ]).partial(time=datetime.now())
 
 primary_tools = RESEARCH_SAFE_TOOLS + [get_product_info]
-primary_runnable = primary_prompt | llm.bind_tools(
-    primary_tools + [ToResearchAssistant, ToMarketAssistant, ToTradeAssistant])
+primary_llm = build_reliable_runnable(
+    llm.bind_tools(
+        primary_tools + [
+            ToResearchAssistant,
+            ToMarketAssistant,
+            ToTradeAssistant,
+        ]
+    )
+).with_config({
+    "callbacks": [
+        LLMMonitorCallback(
+            agent_name="primary",
+            model_name="qwen3.8-max-0902",
+        )
+    ]
+})
+
+primary_runnable = primary_prompt | primary_llm
