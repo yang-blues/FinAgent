@@ -9,6 +9,9 @@ from graph_fin.memory import memory_compression_node
 from graph_fin.route_fin import route_primary_assistant, route_after_child
 from graph_fin.state import State
 from graph_fin.wrapper_nodes import create_wrapper
+from rag_graph.rag_subgraph import RESEARCH_SAFE_TOOLS
+from tools.fin_tools import MARKET_SAFE_TOOLS, TRADE_SAFE_TOOLS, TRADE_SENSITIVE_TOOLS
+from tools.runtime.registry import ToolPolicyRegistry
 from tools.tools_handler import create_tool_node_with_fallback
 
 
@@ -22,8 +25,15 @@ def build_graph(**kwargs) -> StateGraph:
     #行情搜索的mcp工具
     stock_tools = kwargs.get("stock_tools", [])
     checkpointer = kwargs.get("checkpointer", None)
+    #收集所有工具
+    SAFE_TOOLS = RESEARCH_SAFE_TOOLS + MARKET_SAFE_TOOLS + TRADE_SAFE_TOOLS + stock_tools
+    SENSITIVE_TOOLS =TRADE_SENSITIVE_TOOLS
+    #创建统一注册表
+    tool_policy_registry =ToolPolicyRegistry()
+    tool_policy_registry.register_tool_policy(
+        SAFE_TOOLS,SENSITIVE_TOOLS, )
 
-
+    #创建主图
     builder = StateGraph(State)
     builder.add_node("fetch_user_profile",get_user_profile)
     builder.add_node("compress_memory",memory_compression_node)
@@ -32,13 +42,13 @@ def build_graph(**kwargs) -> StateGraph:
     builder.add_edge("fetch_user_profile","compress_memory")
     # 三个子图：独立编译 + wrapper 挂载（私有 schema ↔ 总线的翻译层）
     builder.add_node("research",create_wrapper(
-        build_research_graph(checkpointer), "research"
+        build_research_graph(tool_policy_registry,checkpointer), "research"
     ))
     builder.add_node("market", create_wrapper(
-        build_market_graph(stock_tools,checkpointer), "market"
+        build_market_graph(tool_policy_registry,stock_tools,checkpointer), "market"
     ))
     builder.add_node("trade", create_wrapper(
-        build_trade_graph(checkpointer), "trade"
+        build_trade_graph(tool_policy_registry,checkpointer), "trade"
     ))
     for child in ("research","market","trade"):
         builder.add_conditional_edges(
@@ -47,7 +57,7 @@ def build_graph(**kwargs) -> StateGraph:
     builder.add_node("primary_assistant", FinAssistant(primary_runnable))
     builder.add_edge("compress_memory", "primary_assistant")
     builder.add_node("primary_assistant_tools",
-                     create_tool_node_with_fallback(primary_tools))
+                     create_tool_node_with_fallback(primary_tools,tool_policy_registry))
 
     builder.add_conditional_edges(
         "primary_assistant", route_primary_assistant,

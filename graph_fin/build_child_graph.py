@@ -17,6 +17,7 @@ from graph_fin.route_fin import route_research, route_market, route_after_trade_
 from graph_fin.state import ChildState, TradeState
 from rag_graph.rag_subgraph import RESEARCH_SAFE_TOOLS
 from tools.fin_tools import MARKET_SAFE_TOOLS
+from tools.runtime.registry import ToolPolicyRegistry
 from tools.tools_handler import create_tool_node_with_fallback
 
 
@@ -37,13 +38,13 @@ def _handoff_exit(state: dict) -> dict:
         )
     return {"messages": messages}
 # ------------------------------------------------------------------ 投研子图
-def build_research_graph(checkpointer=None):
+def build_research_graph(tool_policy_registry:ToolPolicyRegistry,checkpointer=None):
     """投研助理子图，条款与研报问答，只有只读工具"""
     builder = StateGraph(ChildState)
     builder.add_node("enter_research",
                      create_entry_node("投研助理"))
     builder.add_node("research",FinAssistant(research_runnable))
-    builder.add_node("research_tools",create_tool_node_with_fallback(RESEARCH_SAFE_TOOLS))
+    builder.add_node("research_tools",create_tool_node_with_fallback(RESEARCH_SAFE_TOOLS,tool_policy_registry))
     builder.add_edge(START,"enter_research")
     builder.add_edge("enter_research", "research")
 
@@ -56,14 +57,14 @@ def build_research_graph(checkpointer=None):
     builder.add_edge("exit", END)
     return builder.compile(checkpointer=checkpointer)
 # ------------------------------------------------------------------ 行情子图
-def build_market_graph(mcptool:list[BaseTool],checkpointer=None):
+def build_market_graph(tool_policy_registry:ToolPolicyRegistry,mcptool:list[BaseTool],checkpointer=None):
     """行情助理子图：行情 / 持仓 / 账户，全部只读，不打断用户。"""
     builder = StateGraph(ChildState)
     builder.add_node("enter_market", create_entry_node("行情助理"))
     builder.add_node("market", FinAssistant(get_market_runnable(mcptool)))
     builder.add_edge(START, "enter_market")
     builder.add_edge("enter_market", "market")
-    builder.add_node("market_tools", create_tool_node_with_fallback(MARKET_SAFE_TOOLS+mcptool))
+    builder.add_node("market_tools", create_tool_node_with_fallback(MARKET_SAFE_TOOLS+mcptool,tool_policy_registry))
     builder.add_edge("market_tools", "market")
     builder.add_conditional_edges("market", route_market,
                                   ["market_tools", "exit", END])
@@ -92,7 +93,7 @@ def approval_node(state:dict):
     return Command(goto="trade",
                    update={"messages": tool_messages})
 
-def build_trade_graph(checkpointer=None):
+def build_trade_graph(tool_policy_registry:ToolPolicyRegistry,checkpointer=None):
     """交易助理子图：写操作前由条件边**强制插入**合规核查节点"""
     builder = StateGraph(TradeState)
     builder.add_node("enter_trade",create_entry_node("交易助理"))
@@ -102,9 +103,9 @@ def build_trade_graph(checkpointer=None):
     builder.add_edge("enter_trade", "trade")
     builder.add_node(
         "trade_safe_tools",
-        create_tool_node_with_fallback(trade_safe_tools))
+        create_tool_node_with_fallback(trade_safe_tools,tool_policy_registry))
     builder.add_node("trade_sensitive_tools",
-                     create_tool_node_with_fallback(trade_sensitive_tools))
+                     create_tool_node_with_fallback(trade_sensitive_tools,tool_policy_registry))
     builder.add_node("compliance_check",compliance_node)
 
     builder.add_edge("trade_safe_tools", "trade")

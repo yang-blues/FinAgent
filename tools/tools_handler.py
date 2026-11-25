@@ -1,18 +1,33 @@
 from langchain_core.runnables import RunnableLambda
-
+from langgraph.prebuilt import ToolNode
+from tools.runtime.interceptor import ToolInterceptor
+from tools.runtime.registry import ToolPolicyRegistry
 from untils.log_utils import log
 
 
-def create_tool_node_with_fallback(tools:list):
+def create_tool_node_with_fallback(
+    tools: list,
+    tool_policy_registry: ToolPolicyRegistry,
+):
     """
-    带兜底机制的工具节点调用
-    参数:
-        tools (list): 工具列表。
-    返回:
-        带回退机制的 ToolNode。
+    创建带执行策略拦截和兜底机制的工具节点。
+
+    Args:
+        tools: 当前 Agent 可使用的工具列表。
+        tool_policy_registry: 全局工具策略注册表。
+
+    Returns:
+        配置了执行策略的 ToolNode。
     """
-    from langgraph.prebuilt import ToolNode
-    return ToolNode(tools).with_fallbacks(
+    interceptor = ToolInterceptor(tool_policy_registry)
+
+    tool_node = ToolNode(
+        tools,
+        wrap_tool_call=interceptor.tool_call_interceptor,
+        awrap_tool_call=interceptor.async_tool_call_interceptor,
+    )
+    #toolnode节点会自己捕获异常，有可能我们外部的就没用了
+    return tool_node.with_fallbacks(
         [RunnableLambda(handle_tool_error)], exception_key="error"
     )
 
@@ -38,28 +53,7 @@ def handle_tool_error(state) -> dict:
         ]
     }
 
-def _print_event(event: dict, _printed: set, max_length=1500):
-    """
-    打印流式事件，用于本地调试与 Gradio 状态图快照。
 
-    参数:
-        event (dict): 事件字典。
-        _printed (set): 已打印过的消息 id，避免重复打印。
-        max_length (int): 消息最大长度，超出截断。
-    """
-    current_state = event.get("dialog_state")
-    if current_state:
-        print("当前处于: ", current_state[-1])
-    message = event.get("messages")
-    if message:
-        if isinstance(message, list):
-            message = message[-1]
-        if message.id not in _printed:
-            msg_repr = message.pretty_repr(html=True)
-            if len(msg_repr) > max_length:
-                msg_repr = msg_repr[:max_length] + " ... （已截断）"
-            print(msg_repr)
-            _printed.add(message.id)
 
 
 
