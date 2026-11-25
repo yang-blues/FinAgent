@@ -10,17 +10,23 @@
    同一条 SQL），核销不到票直接拒绝。合规约束从 prompt 层、路由层下沉到
    函数级——这是唯一无法被绕过的层级：票据用过即废、过期即废，
    重复提交与重放攻击都卡在这里。
+
+异步化（第一/二步改造）
+--------------------
+数据访问走 ``tools/fin_db_async.py``（SQLAlchemy AsyncSession + asyncpg），
+全部工具是 async 函数：图运行时由 ToolNode 直接 await，不占线程池。
+工具签名、参数、返回文本与旧同步版完全一致——拦截器、路由、prompt 零感知。
+票据核销直接 ``await graph_fin.ticket.consume_ticket``（第二步已迁回票据层，
+本文件不再有本地实现）。
 """
 import json
 import time
-import zlib
-from datetime import datetime
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
 from graph_fin.ticket import consume_ticket
-from tools import fin_db
+from tools import fin_db_async as fin_db
 from untils.log_utils import log
 
 # 敏感工具名：路由用它判断"这条 tool_call 会不会产生副作用"
@@ -64,51 +70,51 @@ def _to_float(x) -> float:
 
 # ------------------------------------------------------------------ safe 工具
 @tool
-def get_product_info(product_code: str = "") -> str:
+async def get_product_info(product_code: str = "") -> str:
     """查询在售产品的要素：名称、风险等级 R1~R5、最新净值、起购金额。
 
     不传 product_code 时返回全部在售产品列表。只读查询。
     """
     if product_code:
-        p = fin_db.get_product(product_code)
+        p = await fin_db.get_product(product_code)
         if not p:
             return f"未找到产品 {product_code}（可能已下架或代码有误）。"
         return json.dumps(p, ensure_ascii=False)
-    return json.dumps(fin_db.list_products(), ensure_ascii=False)
+    return json.dumps(await fin_db.list_products(), ensure_ascii=False)
 
 
 @tool
-def get_my_positions(config: RunnableConfig) -> str:
+async def get_my_positions(config: RunnableConfig) -> str:
     """查询当前登录用户的持仓与账户可用资金、风险等级。只读查询。"""
     uid = _user_id(config)
-    acc = fin_db.get_account(uid)
+    acc = await fin_db.get_account(uid)
     if not acc:
         return f"未找到账户 {uid}。"
-    positions = fin_db.get_positions(uid)
+    positions = await fin_db.get_positions(uid)
     return json.dumps({
         "user_id": uid,
         "name": acc["name"],
         "risk_level": acc["risk_level"],
         "cash": round(acc["cash"], 2),
-        "total_asset": round(fin_db.get_total_asset(uid), 2),
+        "total_asset": round(await fin_db.get_total_asset(uid), 2),
         "positions": positions,
     }, ensure_ascii=False)
 
 
 @tool
-def get_my_orders(limit: int = 10, config: RunnableConfig = None) -> str:
+async def get_my_orders(limit: int = 10, config: RunnableConfig = None) -> str:
     """查询当前登录用户的历史订单（含状态与幂等键）。只读查询。"""
     uid = _user_id(config)
-    return json.dumps(fin_db.list_orders(uid, limit), ensure_ascii=False)
+    return json.dumps(await fin_db.list_orders(uid, limit), ensure_ascii=False)
 
 
 # ------------------------------------------------------------------ sensitive 工具
 @tool
-def place_order(product_code: str,
-                action: str,
-                amount: str,
-                client_order_id: str,
-                config: RunnableConfig = None) -> str:
+async def place_order(product_code: str,
+                      action: str,
+                      amount: str,
+                      client_order_id: str,
+                      config: RunnableConfig = None) -> str:
     """下单（买入/卖出）。这是会产生真实副作用的写操作，执行前必须先通过合规核查。
 
     **调用前提**：已与用户确认标的、方向、金额三要素。amount 必填，不得留空、
@@ -126,23 +132,23 @@ def place_order(product_code: str,
     # ① 函数级 fail-closed：核销不到票据，谁都别想下单
     # 一条 SQL 同时完成"校验 + 作废"：票据按"工具名 + 标的 + 金额"三要素对齐，
     # 防止"用买 A 的票据去买 B"、"批了 5 万实际下 50 万"，也防重复提交
-    ok, reason, ticket = consume_ticket(tid, action="place_order",
-                                        product_code=product_code,
-                                        amount=_to_float(amount))
+    ok, reason, ticket = await consume_ticket(tid, action="place_order",
+                                               product_code=product_code,
+                                               amount=_to_float(amount))
     if not ok:
-        fin_db.write_audit(uid, "place_order", json.dumps(
+        await fin_db.write_audit(uid, "place_order", json.dumps(
             {"product_code": product_code, "amount": amount}, ensure_ascii=False),
             "rejected", reason)
         return f"【拒绝下单】{reason}"
 
     # ② 幂等：同一个 client_order_id 直接返回原单，不重复成交
-    exist = fin_db.find_order_by_client_id(client_order_id)
+    exist = await fin_db.find_order_by_client_id(client_order_id)
     if exist:
         return (f"该幂等键已存在订单，未重复下单。订单号 {exist['order_id']}，"
                 f"状态 {exist['status']}。")
 
     amt = _to_float(amount)
-    product = fin_db.get_product(product_code)
+    product = await fin_db.get_product(product_code)
     if not product:
         return f"产品 {product_code} 不存在，下单失败。"
     if amt < product["min_buy"]:
@@ -152,69 +158,69 @@ def place_order(product_code: str,
     snapshot = json.dumps({"decision": "pass", "ticket_id": ticket["ticket_id"],
                            "checked_at": int(time.time())}, ensure_ascii=False)
     try:
-        order_id = fin_db.place_order_row(uid, product_code, action, amt,
-                                          client_order_id, snapshot)
+        order_id = await fin_db.place_order_row(uid, product_code, action, amt,
+                                                client_order_id, snapshot)
     except fin_db.INTEGRITY_ERRORS:
         # 数据库唯一约束兜底：并发下两个请求用同一个幂等键，必有一个撞到这里
         return "幂等键冲突，订单已存在，未重复下单。"
 
-    if action == "buy" and amt <= (fin_db.get_account(uid) or {}).get("cash", 0):
-        fin_db.deduct_cash(uid, amt)
-    fin_db.update_order_status(order_id, "filled")
-    fin_db.write_audit(uid, "place_order",
-                       json.dumps({"order_id": order_id, "product_code": product_code,
-                                   "amount": amt,
-                                   "ticket_id": ticket["ticket_id"]},
-                                  ensure_ascii=False),
-                       "filled", reason)
+    if action == "buy" and amt <= ((await fin_db.get_account(uid)) or {}).get("cash", 0):
+        await fin_db.deduct_cash(uid, amt)
+    await fin_db.update_order_status(order_id, "filled")
+    await fin_db.write_audit(uid, "place_order",
+                             json.dumps({"order_id": order_id, "product_code": product_code,
+                                         "amount": amt,
+                                         "ticket_id": ticket["ticket_id"]},
+                                        ensure_ascii=False),
+                             "filled", reason)
     log.info(f"下单成功 order_id={order_id} user={uid} {action} {product_code} {amt}")
     return (f"下单成功。订单号 {order_id}，{action} {product_code} 金额 {amt:.2f} 元，"
             f"状态 filled。")
 
 
 @tool
-def cancel_order(order_id: int,
-                 client_order_id: str,
-                 config: RunnableConfig = None) -> str:
+async def cancel_order(order_id: int,
+                       client_order_id: str,
+                       config: RunnableConfig = None) -> str:
     """撤销一笔已提交的订单。写操作，执行前必须先通过合规核查。
 
     参数 client_order_id 为本撤单请求自己的幂等键，与下单时的幂等键不同。
     """
     uid, tid = _user_id(config), _thread_id(config)
-    ok, reason, ticket = consume_ticket(tid, action="cancel_order",
-                                        product_code=str(order_id))
+    ok, reason, ticket = await consume_ticket(tid, action="cancel_order",
+                                               product_code=str(order_id))
     if not ok:
-        fin_db.write_audit(uid, "cancel_order", str(order_id), "rejected", reason)
+        await fin_db.write_audit(uid, "cancel_order", str(order_id), "rejected", reason)
         return f"【拒绝撤单】{reason}"
 
-    exist = fin_db.find_order_by_client_id(client_order_id)
+    exist = await fin_db.find_order_by_client_id(client_order_id)
     if exist:
         return f"该幂等键已处理过（订单 {exist['order_id']}），未重复撤单。"
 
-    fin_db.update_order_status(order_id, "cancelled")
-    fin_db.write_audit(uid, "cancel_order",
-                       json.dumps({"order_id": order_id,
-                                   "ticket_id": ticket["ticket_id"]},
-                                  ensure_ascii=False),
-                       "cancelled", reason)
+    await fin_db.update_order_status(order_id, "cancelled")
+    await fin_db.write_audit(uid, "cancel_order",
+                             json.dumps({"order_id": order_id,
+                                         "ticket_id": ticket["ticket_id"]},
+                                        ensure_ascii=False),
+                             "cancelled", reason)
     return f"订单 {order_id} 已撤销。"
 
 
 @tool
-def rebalance(targets: str,
-              client_order_id: str,
-              config: RunnableConfig = None) -> str:
+async def rebalance(targets: str,
+                    client_order_id: str,
+                    config: RunnableConfig = None) -> str:
     """按目标权重调仓。写操作，执行前必须先通过合规核查。
 
     参数 targets 形如 '{"510300": 0.6, "000198": 0.4}'，表示各标的的目标占比。
     """
     uid, tid = _user_id(config), _thread_id(config)
-    ok, reason, ticket = consume_ticket(tid, action="rebalance", product_code=targets)
+    ok, reason, ticket = await consume_ticket(tid, action="rebalance", product_code=targets)
     if not ok:
-        fin_db.write_audit(uid, "rebalance", targets, "rejected", reason)
+        await fin_db.write_audit(uid, "rebalance", targets, "rejected", reason)
         return f"【拒绝调仓】{reason}"
 
-    exist = fin_db.find_order_by_client_id(client_order_id)
+    exist = await fin_db.find_order_by_client_id(client_order_id)
     if exist:
         return f"该幂等键已处理过（订单 {exist['order_id']}），未重复调仓。"
 
@@ -226,11 +232,11 @@ def rebalance(targets: str,
     if abs(total - 1.0) > 0.01:
         return f"目标权重合计 {total}，必须约等于 1.0，调仓失败。"
 
-    fin_db.write_audit(uid, "rebalance",
-                       json.dumps({"targets": plan,
-                                   "ticket_id": ticket["ticket_id"]},
-                                  ensure_ascii=False),
-                       "filled", reason)
+    await fin_db.write_audit(uid, "rebalance",
+                             json.dumps({"targets": plan,
+                                         "ticket_id": ticket["ticket_id"]},
+                                        ensure_ascii=False),
+                             "filled", reason)
     return f"调仓完成，目标配置 {plan}。"
 
 

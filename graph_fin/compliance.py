@@ -8,7 +8,7 @@ from langchain_core.runnables import RunnableConfig
 from graph_fin.ticket import issue_ticket, get_pending_ticket
 from llm_model.all_llm import llm
 from search.hybrid_retriever import get_compliance_retriever
-from tools import fin_db
+from tools import fin_db_async as fin_db
 from tools.fin_tools import SENSITIVE_TOOL_NAMES
 from untils.log_utils import log
 
@@ -66,7 +66,7 @@ def ticket_matches(state:dict,intent:dict) -> bool:
             return False
     return True
 
-def evaluate_rules(user_id: str, intent: dict):
+async def evaluate_rules(user_id: str, intent: dict):
     """规则引擎：确定性判定，不经过模型。
 
     返回:
@@ -74,7 +74,7 @@ def evaluate_rules(user_id: str, intent: dict):
         decision ∈ {"pass", "block", "insufficient_evidence"}
     """
     warnings = []
-    account = fin_db.get_account(user_id)
+    account = await fin_db.get_account(user_id)
     if not account:
         return ("insufficient_evidence",
                 f"未检索到用户 {user_id} 的账户与适当性信息，无法完成匹配。",
@@ -94,7 +94,7 @@ def evaluate_rules(user_id: str, intent: dict):
             return ("block", "调仓目标配置不是合法 JSON，无法校验。", False, warnings)
         return ("pass", "调仓目标权重合法。", True, warnings)
 
-    product = fin_db.get_product(product_code)
+    product = await fin_db.get_product(product_code)
     if not product:
         return ("insufficient_evidence",
                 f"未检索到产品 {product_code} 的要素与风险等级，无法做适当性匹配。",
@@ -126,14 +126,14 @@ def evaluate_rules(user_id: str, intent: dict):
 
     # 规则四：单日申购限额
     limit = fin_db.DAILY_LIMIT.get(account["risk_level"], 0.0)
-    used = fin_db.get_today_buy_amount(user_id)
+    used = await fin_db.get_today_buy_amount(user_id)
     if amount and used + amount > limit:
         return ("block",
                 f"超出单日申购限额：{account['risk_level']} 级限额 {limit:.0f} 元，"
                 f"今日已申购 {used:.0f} 元，本次 {amount:.0f} 元。", False, warnings)
 
     # 规则五：集中度（不拦截，只提示——拦截会误伤正常的大额低风险配置）
-    total = fin_db.get_total_asset(user_id)
+    total = await fin_db.get_total_asset(user_id)
     if total and amount / total > fin_db.CONCENTRATION_LIMIT:
         warnings.append(
             f"本次买入占账户总资产 {amount / total:.1%}，"
@@ -191,7 +191,7 @@ def explain_decision(decision: str, reason: str, evidence: list, warnings: list)
         log.warning(f"合规结论润色失败，退回模板文本: {e}")
         return f"{reason}\n依据：\n{ev}\n{warn}"
 
-def compliance_node(state:dict,config: RunnableConfig) -> dict:
+async def compliance_node(state:dict,config: RunnableConfig) -> dict:
     """合规核查节点，规则引擎判定 + RAG去证据 + 签发票据
     参数:
         state (dict): 主图状态。
@@ -212,7 +212,7 @@ def compliance_node(state:dict,config: RunnableConfig) -> dict:
             "compliance_warnings": [],
         }
 
-    decision, reason, matched, warnings = evaluate_rules(user_id, intent)
+    decision, reason, matched, warnings = await evaluate_rules(user_id, intent)
 
     # RAG 取证据（fail-closed：拿不到证据一律按"证据不足"处理）
     query = f"投资者适当性管理 风险等级 匹配 {intent.get('product_code', '')}".strip()
@@ -226,7 +226,7 @@ def compliance_node(state:dict,config: RunnableConfig) -> dict:
     if decision == "pass":
         # 签票：只写库，不回 State。定位票据全靠 thread_id，
         # 且签发前会自动吊销该会话未核销的旧票——参数变了旧票必须失效。
-        ticket_id = issue_ticket(
+        ticket_id = await issue_ticket(
             thread_id, user_id, intent["tool"],
             intent.get("product_code", ""), intent.get("amount", 0.0),
             evidence_text, tool_call_id=intent.get("tool_call_id", ""),
@@ -264,11 +264,11 @@ def route_after_compliance(state: dict) -> Literal["approval_node", "trade"]:
     return "trade"
 
 
-def build_approval_card(state: dict, thread_id: str = "") -> dict:
+async def build_approval_card(state: dict, thread_id: str = "") -> dict:
     """给前端的审批卡片：人核对的是**依据**，不是盲批动作。
     票据按 thread_id 从库里现查（取该会话唯一那张 issued 票）
     """
-    ticket = get_pending_ticket(thread_id) or {}
+    ticket = (await get_pending_ticket(thread_id)) or {}
     return {
         "action": ticket.get("action", ""),
         "product_code": ticket.get("product_code", ""),

@@ -42,9 +42,10 @@ def _lit(v) -> str:
 def build_sql() -> str:
     """生成完整建表 + 演示数据脚本（PostgreSQL）。
 
-    这份 SQL 与 ``fin_db._ddl()`` 同源，改表结构时两边会自动保持一致。
+    这份 SQL 与 ``fin_schema._ddl()`` 同源，改表结构时两边会自动保持一致。
     """
     from tools import fin_db
+    from tools.fin_schema import _ddl, SEED_ACCOUNTS, SEED_POSITIONS, SEED_PRODUCTS
     from untils import db_config
 
     header = (
@@ -59,18 +60,18 @@ def build_sql() -> str:
         "",
         "-- ---------- 建表 ----------",
     ]
-    for stmt in fin_db._ddl():
+    for stmt in _ddl():
         lines.append(stmt + ";")
         lines.append("")
 
     lines.append("-- ---------- 账户 ----------")
-    for row in fin_db.SEED_ACCOUNTS:
+    for row in SEED_ACCOUNTS:
         vals = ", ".join(_lit(x) for x in row + ("active",))
         lines.append(db_config.insert_ignore(
             "accounts", "user_id,name,risk_level,cash,status", vals) + ";")
 
     lines.extend(["", "-- ---------- 产品 ----------"])
-    for row in fin_db.SEED_PRODUCTS:
+    for row in SEED_PRODUCTS:
         vals = ", ".join(_lit(x) for x in row + ("on_sale",))
         lines.append(db_config.insert_ignore(
             "products",
@@ -83,7 +84,7 @@ def build_sql() -> str:
         "-- ---------- 持仓（无唯一键，重跑前先清空） ----------",
         "DELETE FROM positions;",
     ])
-    for row in fin_db.SEED_POSITIONS:
+    for row in SEED_POSITIONS:
         vals = ", ".join(_lit(x) for x in row)
         lines.append(
             f"INSERT INTO positions(user_id,product_code,shares,cost)"

@@ -19,11 +19,16 @@
    同时完成"校验"和"作废"。
 
 第三道是唯一绕不过去的层级——即使路由写错、即使人误批了，没有票也下不了单。
+
+异步化（第二步改造）
+--------------------
+全部函数 async，数据访问走 ``tools/fin_db_async.py``。
+工具层（fin_tools）与合规节点（compliance）直接 ``await`` 本模块的函数。
 """
 import hashlib
 from datetime import datetime
 
-from tools import fin_db
+from tools import fin_db_async as fin_db
 from untils.log_utils import log
 
 # 票据有效期（秒）。太短影响正常操作，太长会放大误批的后果。
@@ -42,8 +47,8 @@ def hash_evidence(evidence: str) -> str:
     return hashlib.sha256((evidence or "").encode("utf-8")).hexdigest()[:16]
 
 
-def issue_ticket(thread_id, user_id, action, product_code, amount,
-                 evidence="", tool_call_id="", client_order_id="") -> str:
+async def issue_ticket(thread_id, user_id, action, product_code, amount,
+                       evidence="", tool_call_id="", client_order_id="") -> str:
     """合规通过后签发票据，只在 compliance_node 里调用。
 
     签发前先把该会话未核销的旧票吊销：参数变了旧票必须失效，
@@ -53,8 +58,8 @@ def issue_ticket(thread_id, user_id, action, product_code, amount,
         str: ticket_id。只在日志与审计里用，不回写 State——
              后续定位票据一律走 thread_id。
     """
-    revoke_ticket(thread_id)
-    return fin_db.issue_ticket_row(
+    await revoke_ticket(thread_id)
+    return await fin_db.issue_ticket_row(
         thread_id=thread_id,
         user_id=user_id,
         action=action,
@@ -67,7 +72,7 @@ def issue_ticket(thread_id, user_id, action, product_code, amount,
     )
 
 
-def consume_ticket(thread_id, action, product_code=None, amount=None):
+async def consume_ticket(thread_id, action, product_code=None, amount=None):
     """写工具的第一行调用它：原子核销，返回 (是否放行, 理由, 票据)。
 
     一次调用同时完成四件事，任一不满足就拒绝：
@@ -80,15 +85,15 @@ def consume_ticket(thread_id, action, product_code=None, amount=None):
         tuple: (bool, str, dict | None)。命中时第三个元素是票据本身，
                便于把 ticket_id 写进订单快照与审计日志。
     """
-    ticket = fin_db.consume_ticket(thread_id, action, product_code, amount,
-                                   tolerance=AMOUNT_TOLERANCE)
+    ticket = await fin_db.consume_ticket(thread_id, action, product_code, amount,
+                                         tolerance=AMOUNT_TOLERANCE)
     if ticket:
         log.info(f"合规票据 {ticket['ticket_id']} 核销通过 | {action}"
                  f" {ticket['product_code']}")
         return True, f"合规票据 {ticket['ticket_id']} 校验通过。", ticket
 
     # 没命中：区分"压根没票 / 已用掉"与"过期 / 参数对不上"，回执要说清原因
-    pending = fin_db.get_pending_ticket(thread_id)
+    pending = await fin_db.get_pending_ticket(thread_id)
     if pending:
         if pending["expires_at"] <= _now_text():
             reason = f"合规票据已过期（有效期 {TICKET_TTL}s），请重新发起合规核查。"
@@ -96,26 +101,26 @@ def consume_ticket(thread_id, action, product_code=None, amount=None):
             reason = (f"票据与本次请求不匹配：票据为 {pending['action']}"
                       f" {pending['product_code']}，本次为 {action}"
                       f" {product_code or '-'}，请重新发起合规核查。")
-        fin_db.revoke_tickets(thread_id)
+        await fin_db.revoke_tickets(thread_id)
     else:
         reason = "未找到有效合规票据，写操作必须先经过合规核查节点。"
     log.warning(f"合规票据核销失败 | {action} {product_code or '-'} | {reason}")
     return False, reason, None
 
 
-def revoke_ticket(thread_id) -> int:
+async def revoke_ticket(thread_id) -> int:
     """吊销票据：用户拒绝审批、或开始新一轮写操作时调用。返回影响行数。"""
-    n = fin_db.revoke_tickets(thread_id)
+    n = await fin_db.revoke_tickets(thread_id)
     if n:
         log.info(f"吊销会话 {thread_id} 的 {n} 张未核销票据")
     return n
 
 
-def get_ticket(ticket_id: str):
+async def get_ticket(ticket_id: str):
     """按票据号查全量信息，审批卡片与审计追溯用。"""
-    return fin_db.get_ticket(ticket_id)
+    return await fin_db.get_ticket(ticket_id)
 
 
-def get_pending_ticket(thread_id: str):
+async def get_pending_ticket(thread_id: str):
     """取会话当前未核销的票据，给审批卡片做兜底。"""
-    return fin_db.get_pending_ticket(thread_id)
+    return await fin_db.get_pending_ticket(thread_id)

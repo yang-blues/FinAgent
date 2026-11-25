@@ -36,6 +36,9 @@ async def lifespan(app:FastAPI):
 
         yield
 
+    # 释放 async 数据层连接池（SQLAlchemy async engine）
+    from untils.async_db import close_async_engine
+    await close_async_engine()
     log.info("Langgraph资源已释放")
 app = FastAPI(lifespan=lifespan)
 

@@ -70,7 +70,7 @@ async def chat(data:ChatRequest,request:Request):
                     state["compliance_decision"] = sub_vals.get("compliance_decision", "")
                     break
             #组装审批卡片
-            approval_card = build_approval_card(
+            approval_card = await build_approval_card(
                 state,
                 thread_id=data.thread_id,
             )
@@ -149,7 +149,7 @@ async def approval(data:ApprovalRequest,request:Request):
 
         if has_new_interrupt:
 
-            approval_card = build_approval_card(
+            approval_card = await build_approval_card(
                 new_snapshot.values,
                 thread_id=data.thread_id,
             )
